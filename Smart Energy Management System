@@ -1,0 +1,152 @@
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// WiFi and MQTT configuration
+const char* ssid = "your_SSID";
+const char* password = "your_PASSWORD";
+const char* mqtt_server = "your_MQTT_broker_address";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Pin definitions
+#define CURRENT_SENSOR_PIN A0
+#define RELAY_PIN 2
+#define SOLAR_PANEL_PIN A1
+#define BATTERY_LEVEL_PIN A2
+
+// Function prototypes
+void setup_wifi();
+void reconnect();
+float readCurrent();
+float readSolarPower();
+float readBatteryLevel();
+void balanceGrid(float power, float solar_power, float battery_level);
+void callback(char* topic, byte* payload, unsigned int length);
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(CURRENT_SENSOR_PIN, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  float current = readCurrent();
+  float power = current * 230; // Assuming 230V system
+  float solar_power = readSolarPower();
+  float battery_level = readBatteryLevel();
+
+  StaticJsonDocument<256> doc;
+  doc["current"] = current;
+  doc["power"] = power;
+  doc["solar_power"] = solar_power;
+  doc["battery_level"] = battery_level;
+
+  char buffer[256];
+  size_t n = serializeJson(doc, buffer);
+
+  client.publish("home/grid/status", buffer);
+
+  balanceGrid(power, solar_power, battery_level);
+
+  delay(1000);
+}
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+      client.subscribe("home/grid/commands");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+float readCurrent() {
+  int analogValue = analogRead(CURRENT_SENSOR_PIN);
+  float voltage = (analogValue / 1024.0) * 5.0;
+  float current = (voltage - 2.5) / 0.066;
+  return current;
+}
+
+float readSolarPower() {
+  int analogValue = analogRead(SOLAR_PANEL_PIN);
+  float voltage = (analogValue / 1024.0) * 5.0;
+  float power = voltage * 10; // Assuming a 10W solar panel for simplicity
+  return power;
+}
+
+float readBatteryLevel() {
+  int analogValue = analogRead(BATTERY_LEVEL_PIN);
+  float voltage = (analogValue / 1024.0) * 5.0;
+  float level = voltage * 100 / 4.2; // Assuming a 4.2V battery
+  return level;
+}
+
+void balanceGrid(float power, float solar_power, float battery_level) {
+  if (battery_level > 80) {
+    // If battery is high, reduce grid load
+    digitalWrite(RELAY_PIN, LOW);
+  } else if (battery_level < 20) {
+    // If battery is low, increase grid load
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  payload[length] = '\0';
+  Serial.println((char*)payload);
+
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.f_str());
+    return;
+  }
+
+  const char* command = doc["command"];
+  if (strcmp(command, "reduce_load") == 0) {
+    digitalWrite(RELAY_PIN, LOW);
+  } else if (strcmp(command, "increase_load") == 0) {
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+}
